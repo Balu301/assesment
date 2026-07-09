@@ -1,0 +1,81 @@
+Here is the complete, formatted document ready to be saved as a Markdown (`.md`) or text file for your final submission.
+
+---
+
+# Deliverable 10: Secure SSH Access to Private GKE Worker Nodes
+
+## 1. Assessment Objective & Architecture Overview
+
+To maintain a strict zero-trust security posture, the GKE worker nodes are deployed within a custom VPC using private subnets. These instances do not have external or public IP addresses, and direct inbound SSH from the public internet is entirely blocked by firewall rules.
+
+To facilitate secure, auditable administrative access to these nodes, this architecture utilizes a **Hardened Bastion Host (Jump Box)** deployed in a dedicated private management subnet. The Bastion acts as the single, tightly monitored entry point into the VPC.
+
+## 2. Security Controls & Implementation
+
+The following security mechanisms are implemented to harden the access pathway:
+
+* **Private-Only Infrastructure:** Both the Bastion host and the GKE worker nodes are provisioned without external IP addresses.
+* **Identity-Aware Proxy (IAP) TCP Forwarding:** Administrators connect to the private Bastion host via Google Cloud IAP. A VPC firewall rule allows TCP port 22 ingress *only* from the central IAP IP block (`35.235.240.0/20`) to the Bastion host.
+* **Internal VPC Isolation:** A secondary firewall rule permits SSH traffic (TCP port 22) to reach the GKE worker nodes *only* when the traffic originates from the Bastion host's internal subnet CIDR.
+* **OS Login Integration:** Google Cloud OS Login is enabled on both the Bastion and the GKE nodes (`enable-oslogin = "TRUE"`). This enforces IAM-based access control, automatically maps Google Workspace identities to temporary Linux accounts, and eliminates the security risks associated with managing static SSH keys.
+* **Auditing and MFA:** Access is strictly governed by IAM roles (`roles/iap.tunnelResourceAccessor` and `roles/compute.osLogin`). Multi-Factor Authentication (MFA) is enforced via Google Identity, and all SSH sessions passing through the Bastion are captured in Cloud Audit Logs.
+
+## 3. Operational Access Workflow
+
+Administrators utilize a secure, two-step jump process to access the GKE nodes:
+
+**Step 1: Authenticate to the Bastion Host**
+The administrator establishes a secure tunnel through IAP using the Google Cloud CLI:
+
+```bash
+gcloud compute ssh bastion-host \
+    --tunnel-through-iap \
+    --project=[PROJECT_ID] \
+    --zone=[ZONE]
+
+```
+
+**Step 2: Connect to the Private GKE Node**
+Once authenticated into the Bastion shell, the administrator initiates an SSH connection to the private GKE worker node using its internal IP address. OS Login handles the identity mapping seamlessly:
+
+```bash
+ssh [GKE_NODE_INTERNAL_IP]
+
+```
+
+## 4. Architecture Diagram
+
+```mermaid
+graph TD
+    User((Admin/Developer))
+    Internet((Internet))
+    
+    subgraph "Google Cloud Platform (GCP)"
+        IAP[Identity-Aware Proxy]
+        CloudNAT[Cloud NAT / Cloud Router]
+        
+        subgraph "Custom VPC"
+            subgraph "Subnet 2 (Management)"
+                Bastion[Hardened Bastion Host \n OS Login Enabled]
+            end
+            
+            subgraph "Subnet 1 (GKE Environment)"
+                GKE_CP[GKE Control Plane \n Private Endpoint]
+                
+                subgraph "GKE Worker Nodes"
+                    HAProxy[HAProxy Pods]
+                    Tomcat[Tomcat Pods]
+                end
+            end
+        end
+    end
+
+    User -->|1. gcloud ssh --tunnel-through-iap| IAP
+    IAP -->|2. TCP 22| Bastion
+    Bastion -->|3. Internal SSH (TCP 22)| GKE Worker Nodes
+    Internet -.->|Blocked| GKE Worker Nodes
+    Internet -.->|Blocked| Bastion
+    GKE Worker Nodes -->|Egress via| CloudNAT
+    CloudNAT -->|Fetch Container Images| Internet
+
+```
